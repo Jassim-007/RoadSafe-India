@@ -1,0 +1,9 @@
+city,total_configurations,passing_configurations,fallback_used
+Bangalore,100,26,False
+Chandigarh,100,0,True
+Chennai,100,17,False
+Delhi,100,23,False
+Hyderabad,100,22,False
+Kolkata,100,16,False
+Mumbai,100,24,False
+Pune,100,17,False

@@ -1,0 +1,5 @@
+,casualties,casualties,casualties,casualties,vehicles_involved,vehicles_involved,vehicles_involved,vehicles_involved,risk_score,risk_score,risk_score,risk_score
+,count,mean,median,std,count,mean,median,std,count,mean,median,std
+analysis_group,,,,,,,,,,,,
+multiple_indicator_hotspot,2135,1.8333,2.0,1.5406,2135,3.015,3.0,1.4018,2135,0.4578,0.45,0.2241
+other_clustered_accident,12016,1.713,1.0,1.4838,12016,2.9886,3.0,1.4184,12016,0.4322,0.45,0.2171

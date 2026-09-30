@@ -1,0 +1,8 @@
+city,accident_records,mean_casualties,mean_vehicles,mean_risk_score,fatality_proportion,major_proportion,peak_hour_proportion,weekend_proportion
+Bangalore,191,1.74,2.91,0.46,20.94,27.75,34.55,27.23
+Chennai,490,1.82,2.98,0.46,18.98,28.78,26.73,27.14
+Delhi,204,1.78,3.01,0.49,21.08,25.49,28.43,33.82
+Hyderabad,330,1.85,3.03,0.46,21.52,27.88,26.06,27.88
+Kolkata,273,1.89,3.03,0.45,21.98,23.81,24.18,25.64
+Mumbai,393,1.84,3.16,0.45,19.85,30.53,22.9,29.52
+Pune,254,1.87,2.9,0.46,21.26,28.74,24.8,29.92

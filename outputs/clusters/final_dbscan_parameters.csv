@@ -1,0 +1,9 @@
+city,dbscan_status,reason,eps_km,min_samples,clusters,noise_percentage,records,largest_cluster,largest_cluster_proportion,median_cluster_size,stability_score,selection_score
+Bangalore,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,1.6,12.0,47.0,15.5,2438,205.0,0.0840853158326497,25.0,0.10497659574468086,2.1259797819116013
+Chandigarh,excluded,Excluded from DBSCAN because none of the tested configurations produced sufficiently separated spatial clusters.,,,,,2577,,,,,
+Chennai,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,0.9,8.0,63.0,16.27,2575,237.0,0.09203883495145632,16.0,0.0,2.2620978441588226
+Delhi,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,1.55,8.0,59.0,15.13,2433,276.0,0.11344019728729964,18.0,0.24608983050847458,1.9878277069854782
+Hyderabad,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,1.25,8.0,70.0,21.59,2409,105.0,0.043586550435865505,20.0,0.1797,1.9954905860652405
+Kolkata,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,0.9,8.0,74.0,20.28,2559,171.0,0.0668229777256741,15.0,0.0,2.188795000380451
+Mumbai,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,1.35,10.0,48.0,19.62,2492,164.0,0.06581059390048154,20.5,0.2834333333333333,1.803048861937913
+Pune,selected,Configuration passed screening and was selected using the parameter-selection diagnostics.,0.9,8.0,70.0,23.0,2517,206.0,0.08184346444179579,16.5,0.0,1.9899198440474497
