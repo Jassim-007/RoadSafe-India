@@ -45,10 +45,38 @@ import {
   useMap,
 } from "react-leaflet";
 
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import "leaflet/dist/leaflet.css";
 
 const API_BASE = "http://127.0.0.1:8000";
+
+const AnalysisContext = createContext(null);
+const ANALYSIS_DEFAULTS = {
+  city: "All Cities",
+  severity: "All Severities",
+  startYear: 2022,
+  endYear: 2025,
+};
+const ANALYSIS_CITIES = [
+  "Bangalore", "Chandigarh", "Chennai", "Delhi",
+  "Hyderabad", "Kolkata", "Mumbai", "Pune",
+];
+
+function useAnalysisContext() {
+  return useContext(AnalysisContext);
+}
+
+function contextQuery(context, extra = {}) {
+  const params = new URLSearchParams();
+  if (context?.city && context.city !== "All Cities") params.set("city", context.city);
+  if (context?.severity && context.severity !== "All Severities") params.set("severity", context.severity);
+  params.set("start_date", `${context?.startYear || 2022}-01-01`);
+  params.set("end_date", `${context?.endYear || 2025}-12-31`);
+  Object.entries(extra).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") params.set(key, value);
+  });
+  return params.toString();
+}
 
 const INDIA_CENTER = [22.5, 78.9];
 
@@ -350,6 +378,7 @@ function SectionHeader({
    ========================================================= */
 
 function Overview() {
+  const { analysisContext } = useAnalysisContext();
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -359,17 +388,38 @@ function Overview() {
       setLoading(true);
       setError("");
 
-      const response = await fetch(
-        `${API_BASE}/api/dashboard`,
-      );
+      const [response, hotspotsResponse] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard`),
+        fetch(`${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`),
+      ]);
 
       if (!response.ok) {
         throw new Error("Dashboard API request failed.");
       }
 
-      const data = await response.json();
-
-      setDashboard(data);
+      const [data, hotspotData] = await Promise.all([response.json(), hotspotsResponse.json()]);
+      const contextResponse = await fetch(`${API_BASE}/api/analysis/context?${contextQuery(analysisContext)}`);
+      if (!contextResponse.ok) throw new Error("Analysis context request failed.");
+      const contextData = await contextResponse.json();
+      const contextHotspots = hotspotData.hotspots || [];
+      const cityLookup = new Map();
+      contextHotspots.forEach((hotspot) => {
+        const current = cityLookup.get(hotspot.city) || { hotspot_candidates: 0, multiple_indicator_hotspots: 0 };
+        current.hotspot_candidates += 1;
+        if (hotspot.risk_profile === "multiple_high_risk_indicators") current.multiple_indicator_hotspots += 1;
+        cityLookup.set(hotspot.city, current);
+      });
+      setDashboard({
+        ...data,
+        cities: contextData.cities.map((city) => ({ ...city, hotspot_candidates: cityLookup.get(city.city)?.hotspot_candidates || 0, multiple_indicator_hotspots: cityLookup.get(city.city)?.multiple_indicator_hotspots || 0 })),
+        overview: {
+          ...data.overview,
+          total_accidents: contextData.summary.accidents,
+          spatial_clusters: contextData.summary.spatial_clusters,
+          hotspot_candidates: contextHotspots.length,
+          multiple_indicator_hotspots: contextHotspots.filter((hotspot) => hotspot.risk_profile === "multiple_high_risk_indicators").length,
+        },
+      });
     } catch (requestError) {
       console.error(requestError);
 
@@ -383,7 +433,7 @@ function Overview() {
 
   useEffect(() => {
     loadOverview();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
 
   if (loading) {
     return (
@@ -712,7 +762,7 @@ function AccidentMarker({ accident }) {
   );
 }
 
-function HotspotMarker({ hotspot }) {
+function HotspotMarker({ hotspot, onSelect }) {
   const location =
     hotspot.location || {};
 
@@ -742,6 +792,7 @@ function HotspotMarker({ hotspot }) {
         fillColor: "#b9ff65",
         fillOpacity: 0.12,
       }}
+      eventHandlers={{ click: () => onSelect?.(hotspot) }}
     >
       <Popup>
         <div className="map-popup">
@@ -872,6 +923,8 @@ function HistoricalMarker({ record }) {
 
 function LiveMap() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { analysisContext, setAnalysisContext } = useAnalysisContext();
 
   const [accidents, setAccidents] = useState([]);
   const [accidentTotal, setAccidentTotal] =
@@ -884,8 +937,7 @@ function LiveMap() {
   const [error, setError] =
     useState("");
 
-  const [selectedCity, setSelectedCity] =
-    useState("All Cities");
+  const selectedCity = analysisContext.city;
 
   const [showAccidents, setShowAccidents] =
     useState(true);
@@ -896,6 +948,8 @@ function LiveMap() {
 
   const [focusPoint, setFocusPoint] =
     useState(null);
+  const [selectedHotspot, setSelectedHotspot] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   async function loadMapData() {
     try {
@@ -908,9 +962,9 @@ function LiveMap() {
         historyResponse,
       ] = await Promise.all([
         fetch(
-          `${API_BASE}/api/accidents?limit=100&offset=0`,
+          `${API_BASE}/api/accidents?${contextQuery(analysisContext, { limit: 1000, offset: 0 })}`,
         ),
-        fetch(`${API_BASE}/api/hotspots`),
+        fetch(`${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`),
         fetch(`${API_BASE}/api/history/kerala`),
       ]);
 
@@ -984,7 +1038,18 @@ function LiveMap() {
 
   useEffect(() => {
     loadMapData();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
+
+  useEffect(() => {
+    if (!isPlaying) return undefined;
+    const timer = window.setInterval(() => {
+      setAnalysisContext((current) => {
+        const next = current.endYear >= 2025 ? 2022 : current.endYear + 1;
+        return { ...current, startYear: next, endYear: next };
+      });
+    }, 1700);
+    return () => window.clearInterval(timer);
+  }, [isPlaying, setAnalysisContext]);
 
   useEffect(() => {
     const focus =
@@ -1040,6 +1105,18 @@ function LiveMap() {
         hotspot.city === selectedCity,
     );
   }, [hotspots, selectedCity]);
+  const visibleAccidents = filteredAccidents.slice(0, 100);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const city = params.get("city");
+    const cluster = Number(params.get("cluster"));
+    if (city && city !== analysisContext.city) setAnalysisContext((current) => ({ ...current, city }));
+    if (cluster) {
+      const match = hotspots.find((item) => item.city === city && item.cluster_id === cluster);
+      if (match) setSelectedHotspot(match);
+    }
+  }, [location.search, hotspots]);
 
   if (loading) {
     return (
@@ -1074,10 +1151,9 @@ function LiveMap() {
             <select
               value={selectedCity}
               onChange={(event) => {
-                setSelectedCity(
-                  event.target.value,
-                );
+                setAnalysisContext((current) => ({ ...current, city: event.target.value }));
                 setFocusPoint(null);
+                setSelectedHotspot(null);
               }}
             >
               <option>All Cities</option>
@@ -1094,11 +1170,18 @@ function LiveMap() {
           </label>
         </div>
 
+        <div className="map-timeline-control">
+          <button type="button" className="timeline-play" onClick={() => setIsPlaying((playing) => !playing)} aria-label={isPlaying ? "Pause timeline" : "Play timeline"}>{isPlaying ? "Ⅱ" : "▶"}</button>
+          <span>YEAR</span>
+          <input aria-label="Map timeline year" type="range" min="2022" max="2025" step="1" value={analysisContext.endYear} onChange={(event) => { const year = Number(event.target.value); setAnalysisContext((current) => ({ ...current, startYear: year, endYear: year })); }} />
+          <b>{analysisContext.startYear === analysisContext.endYear ? analysisContext.endYear : `${analysisContext.startYear}–${analysisContext.endYear}`}</b>
+        </div>
+
         <div className="map-toolbar-stats">
           <span>
             <b>
               {formatNumber(
-                filteredAccidents.length,
+                visibleAccidents.length,
               )}
             </b>{" "}
             shown (limit 100)
@@ -1147,7 +1230,7 @@ function LiveMap() {
             />
 
             {showAccidents &&
-              filteredAccidents.map(
+                    filteredAccidents.slice(0, 100).map(
                 (accident, index) => (
                   <AccidentMarker
                     key={
@@ -1163,9 +1246,10 @@ function LiveMap() {
             {showHotspots &&
               filteredHotspots.map(
                 (hotspot) => (
-                  <HotspotMarker
+                    <HotspotMarker
                     key={`${hotspot.city}-${hotspot.cluster_id}`}
                     hotspot={hotspot}
+                      onSelect={setSelectedHotspot}
                   />
                 ),
               )}
@@ -1183,13 +1267,8 @@ function LiveMap() {
           </MapContainer>
 
           <div className="map-overlay-title">
-            <span className="map-overlay-kicker">
-              ROADSAFE INDIA
-            </span>
-
-            <strong>
-              Spatial Risk Monitor
-            </strong>
+            <img src="/assets/roadsafe-india-mark.png" alt="RoadSafe India" className="map-overlay-mark" />
+            <strong>Spatial Risk Monitor</strong>
           </div>
 
           <div className="map-legend">
@@ -1254,6 +1333,21 @@ function LiveMap() {
         </div>
 
         <aside className="map-side-panel">
+          {selectedHotspot ? (
+            <div className="map-selected-hotspot">
+              <div className="map-side-header"><span className="panel-kicker">SELECTED HOTSPOT</span><h3>{selectedHotspot.city}</h3><span className="detail-cluster">DBSCAN CLUSTER {selectedHotspot.cluster_id}</span></div>
+              <div className="detail-metric-grid">
+                <div><span>Accidents</span><strong>{formatNumber(selectedHotspot.statistics?.accident_count)}</strong></div>
+                <div><span>Casualties</span><strong>{formatNumber(selectedHotspot.statistics?.total_casualties)}</strong></div>
+                <div><span>Fatal</span><strong>{formatNumber(selectedHotspot.statistics?.fatal_accidents)}</strong></div>
+                <div><span>Mean risk</span><strong>{formatDecimal(selectedHotspot.statistics?.mean_risk_score)}</strong></div>
+              </div>
+              <div className="popup-risk-profile">{formatRiskProfile(selectedHotspot.risk_profile)}</div>
+              <button type="button" className="map-action-button" onClick={() => navigate(`/hotspots?city=${encodeURIComponent(selectedHotspot.city)}&cluster=${selectedHotspot.cluster_id}`)}>Open hotspot details <ChevronRight size={14} /></button>
+              <button type="button" className="text-action" onClick={() => setSelectedHotspot(null)}>Back to map snapshot</button>
+            </div>
+          ) : (
+          <>
           <div className="map-side-header">
             <span className="panel-kicker">
               SPATIAL INTELLIGENCE
@@ -1274,7 +1368,7 @@ function LiveMap() {
 
               <strong>
                 {formatNumber(
-                  filteredAccidents.length,
+                  visibleAccidents.length,
                 )}
               </strong>
             </div>
@@ -1322,13 +1416,11 @@ function LiveMap() {
             <span className="status-dot" />
 
             <p>
-              Accident locations show the current API
-              page of records. The full contemporary
-              dataset contains{" "}
+              Accident records and cluster statistics use the active city, severity and date context. Cluster identity and risk profiles remain from the original full-period DBSCAN analysis. Records in scope: {" "}
               {formatNumber(
                 accidentTotal,
               )}{" "}
-              records.
+              .
             </p>
           </div>
 
@@ -1339,6 +1431,8 @@ function LiveMap() {
               RoadSafe India API
             </strong>
           </div>
+          </>
+          )}
         </aside>
       </div>
     </div>
@@ -1351,6 +1445,8 @@ function LiveMap() {
 
 function Hotspots() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { analysisContext, setAnalysisContext } = useAnalysisContext();
 
   const [hotspots, setHotspots] =
     useState([]);
@@ -1362,7 +1458,7 @@ function Hotspots() {
     useState("");
 
   const [selectedCity, setSelectedCity] =
-    useState("All Cities");
+    useState(analysisContext.city);
 
   const [selectedProfile, setSelectedProfile] =
     useState("All Profiles");
@@ -1382,7 +1478,7 @@ function Hotspots() {
       setError("");
 
       const response = await fetch(
-        `${API_BASE}/api/hotspots`,
+        `${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`,
       );
 
       if (!response.ok) {
@@ -1411,7 +1507,23 @@ function Hotspots() {
 
   useEffect(() => {
     loadHotspots();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
+
+  useEffect(() => setSelectedCity(analysisContext.city), [analysisContext.city]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const city = params.get("city");
+    const cluster = Number(params.get("cluster"));
+    if (city) {
+      setSelectedCity(city);
+      setAnalysisContext((current) => ({ ...current, city }));
+    }
+    if (cluster) {
+      const match = hotspots.find((item) => item.city === city && item.cluster_id === cluster);
+      if (match) setSelectedHotspot(match);
+    }
+  }, [location.search, hotspots]);
 
   const cities = useMemo(
     () =>
@@ -1563,7 +1675,7 @@ function Hotspots() {
       return;
     }
 
-    navigate("/map", {
+    navigate(`/map?city=${encodeURIComponent(hotspot.city)}&cluster=${hotspot.cluster_id}`, {
       state: {
         focus: {
           latitude,
@@ -1591,6 +1703,7 @@ function Hotspots() {
 
   return (
     <div className="hotspots-page">
+      <div className="context-explainer">Cluster identities are the existing DBSCAN outputs. City, severity and date context narrow the records and statistics inside those clusters; DBSCAN and full-period risk profiles are not recalculated.</div>
       <section className="hotspot-summary-grid">
         <div className="hotspot-stat">
           <div className="hotspot-stat-label">
@@ -1666,11 +1779,7 @@ function Hotspots() {
           <select
             className="hotspot-select"
             value={selectedCity}
-            onChange={(event) =>
-              setSelectedCity(
-                event.target.value,
-              )
-            }
+              onChange={(event) => { setSelectedCity(event.target.value); setAnalysisContext((current) => ({ ...current, city: event.target.value })); }}
           >
             <option>
               All Cities
@@ -2184,6 +2293,8 @@ function IndicatorRow({
    ========================================================= */
 
 function Cities() {
+  const { analysisContext, setAnalysisContext } = useAnalysisContext();
+  const location = useLocation();
   const [dashboard, setDashboard] =
     useState(null);
 
@@ -2196,8 +2307,14 @@ function Cities() {
   const [error, setError] =
     useState("");
 
-  const [selectedCity, setSelectedCity] =
-    useState("All Cities");
+  const [selectedCity, setSelectedCity] = useState(analysisContext.city);
+
+  const [comparisonCities, setComparisonCities] = useState(() => {
+    const initial = new URLSearchParams(window.location.search).get("compare")?.split(",").filter((city) => ANALYSIS_CITIES.includes(city));
+    return initial?.length ? initial.slice(0, 3) : ["Bangalore", "Delhi"];
+  });
+  const [comparisonData, setComparisonData] = useState([]);
+  const [contextStats, setContextStats] = useState(null);
 
   async function loadCities() {
     try {
@@ -2207,9 +2324,11 @@ function Cities() {
       const [
         dashboardResponse,
         hotspotsResponse,
+        contextResponse,
       ] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard`),
-        fetch(`${API_BASE}/api/hotspots`),
+        fetch(`${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`),
+        fetch(`${API_BASE}/api/analysis/context?${contextQuery(analysisContext)}`),
       ]);
 
       if (!dashboardResponse.ok) {
@@ -2230,6 +2349,8 @@ function Cities() {
 
       const hotspotData =
         await hotspotsResponse.json();
+      const scopedData = await contextResponse.json();
+      setContextStats(scopedData);
 
       setHotspots(
         Array.isArray(
@@ -2251,11 +2372,34 @@ function Cities() {
 
   useEffect(() => {
     loadCities();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
 
-  const cities = Array.isArray(
-    dashboard?.cities,
-  )
+  useEffect(() => {
+    if (analysisContext.city !== "All Cities") setSelectedCity(analysisContext.city);
+  }, [analysisContext.city]);
+
+  useEffect(() => {
+    const requested = new URLSearchParams(location.search).get("compare")?.split(",").filter((city) => ANALYSIS_CITIES.includes(city));
+    if (requested?.length) setComparisonCities(requested.slice(0, 3));
+  }, [location.search]);
+
+  useEffect(() => {
+    Promise.all(comparisonCities.map(async (city) => {
+      const scopedContext = { ...analysisContext, city };
+      const [response, hotspotResponse] = await Promise.all([
+        fetch(`${API_BASE}/api/analysis/context?${contextQuery(scopedContext)}`),
+        fetch(`${API_BASE}/api/hotspots?${contextQuery(scopedContext)}`),
+      ]);
+      if (!response.ok || !hotspotResponse.ok) return null;
+      const [data, hotspotData] = await Promise.all([response.json(), hotspotResponse.json()]);
+      const cityData = data.cities?.[0] || { city, accidents: 0, clustered_records: 0, spatial_clusters: 0, casualties: 0 };
+      return { ...cityData, hotspot_candidates: hotspotData.hotspots?.length || 0, multiple_indicators: hotspotData.hotspots?.filter((item) => item.risk_profile === "multiple_high_risk_indicators").length || 0 };
+    })).then((rows) => setComparisonData(rows.filter(Boolean))).catch(console.error);
+  }, [comparisonCities, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
+
+  const cities = Array.isArray(contextStats?.cities)
+    ? contextStats.cities
+    : Array.isArray(dashboard?.cities)
     ? dashboard.cities
     : [];
 
@@ -2336,9 +2480,7 @@ function Cities() {
         <StatCard
           icon={Building2}
           label="ANALYSED CITIES"
-          value={formatNumber(
-            enrichedCities.length,
-          )}
+          value={formatNumber(contextStats?.cities?.length ?? enrichedCities.length)}
           detail="Cities represented in the contemporary dataset"
           accent
         />
@@ -2346,19 +2488,15 @@ function Cities() {
         <StatCard
           icon={AlertTriangle}
           label="ACCIDENT RECORDS"
-          value={formatNumber(
-            totalAccidents,
-          )}
-          detail="Across all analysed cities"
+          value={formatNumber(contextStats?.summary?.accidents ?? totalAccidents)}
+          detail="Records in current global context"
         />
 
         <StatCard
           icon={Layers3}
           label="CLUSTERED RECORDS"
-          value={formatNumber(
-            totalClustered,
-          )}
-          detail="Records assigned to DBSCAN clusters"
+          value={formatNumber(contextStats?.summary?.clustered_records ?? totalClustered)}
+          detail="Context records already assigned to DBSCAN clusters"
         />
 
         <StatCard
@@ -2386,11 +2524,7 @@ function Cities() {
           <select
             className="hotspot-select"
             value={selectedCity}
-            onChange={(event) =>
-              setSelectedCity(
-                event.target.value,
-              )
-            }
+            onChange={(event) => { setSelectedCity(event.target.value); setAnalysisContext((current) => ({ ...current, city: event.target.value })); }}
           >
             <option>
               All Cities
@@ -2407,6 +2541,16 @@ function Cities() {
               ),
             )}
           </select>
+        </div>
+
+        <div className="city-compare-tools">
+          <div><span className="panel-kicker">COMPARE 2–3 CITIES</span><p>Select cities to compare in the current severity and date context.</p></div>
+          <div className="city-compare-selectors">{ANALYSIS_CITIES.map((city) => <label key={city}><input type="checkbox" checked={comparisonCities.includes(city)} disabled={!comparisonCities.includes(city) && comparisonCities.length >= 3} onChange={() => setComparisonCities((current) => current.includes(city) ? current.filter((item) => item !== city) : [...current, city])} /><span>{city}</span></label>)}</div>
+        </div>
+        <div className="city-comparison-table">
+          <div className="city-comparison-head"><span>MEASURE</span>{comparisonData.map((city) => <strong key={city.city}>{city.city}</strong>)}</div>
+          {[{ label: "Accident records", key: "accidents" }, { label: "Clustered records", key: "clustered_records" }, { label: "Spatial clusters", key: "spatial_clusters" }, { label: "Hotspot candidates", key: "hotspot_candidates" }, { label: "Multi-indicator hotspots", key: "multiple_indicators" }, { label: "Casualties", key: "casualties" }].map((metric) => <div className="city-comparison-row" key={metric.key}><span>{metric.label}</span>{comparisonData.map((city) => <b key={city.city}>{formatNumber(city[metric.key])}</b>)}</div>)}
+          <div className="city-comparison-bars">{comparisonData.map((city) => { const max = Math.max(1, ...comparisonData.map((item) => item.accidents)); return <div key={city.city}><span>{city.city}<b>{formatNumber(city.accidents)}</b></span><i><em style={{ width: `${city.accidents / max * 100}%` }} /></i></div>; })}</div>
         </div>
 
         <div className="city-intelligence-grid">
@@ -2621,6 +2765,7 @@ function Cities() {
    ========================================================= */
 
 function RiskFactors() {
+  const { analysisContext } = useAnalysisContext();
   const [factorData, setFactorData] =
     useState(null);
 
@@ -2641,12 +2786,7 @@ function RiskFactors() {
       setLoading(true);
       setError("");
 
-      const [factorResponse, numericResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/factors`),
-        fetch(
-          `${API_BASE}/api/factors/numeric`,
-        ),
-      ]);
+      const factorResponse = await fetch(`${API_BASE}/api/analysis/context?${contextQuery(analysisContext)}`);
 
       if (!factorResponse.ok) {
         throw new Error(
@@ -2654,17 +2794,10 @@ function RiskFactors() {
         );
       }
 
-      const factorJson =
-        await factorResponse.json();
-
-      const numericJson =
-        numericResponse.ok
-          ? await numericResponse.json()
-          : null;
-
+      const factorJson = await factorResponse.json();
       setFactorData(factorJson?.factors ?? {});
-      setRoadTypeData(factorJson?.factors?.road_type ?? null);
-      setNumericData(numericJson);
+      setRoadTypeData(factorJson?.factors?.road_type ?? []);
+      setNumericData({ records: factorJson?.summary?.clustered_records, summary: factorJson?.numeric });
     } catch (requestError) {
       console.error(requestError);
 
@@ -2678,14 +2811,15 @@ function RiskFactors() {
 
   useEffect(() => {
     loadFactors();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
 
   const factorObject = factorData || {};
   const factorEntries = Object.entries(factorObject)
-    .map(([name, table]) => [name, `${table.rows?.length ?? 0} groups`]);
-  const roadRows = (roadTypeData?.rows || []).map((row) => ({
-    road_type: row.analysis_group,
-    ...row.values,
+    .map(([name, rows]) => [name, rows]);
+  const roadRows = (roadTypeData || []).map((row) => ({
+    road_type: row.value,
+    records: row.count,
+    share: row.percent,
   }));
   const numericRows = Object.entries(numericData?.summary || {}).map(
     ([factor, summary]) => ({ factor, ...summary }),
@@ -2768,26 +2902,8 @@ function RiskFactors() {
                     className="factor-row"
                     key={key}
                   >
-                    <div>
-                      <strong>
-                        {humanize(key)}
-                      </strong>
-
-                      <span>
-                        Dataset factor
-                      </span>
-                    </div>
-
-                    <b>
-                      {typeof value ===
-                      "number"
-                        ? formatDecimal(
-                            value,
-                          )
-                        : humanize(
-                            value,
-                          )}
-                    </b>
+                    <div><strong>{humanize(key)}</strong><span>Current context distribution</span></div>
+                    <div className="factor-value-tags">{value.slice(0, 3).map((item) => <span key={item.value}>{humanize(item.value)} <b>{formatDecimal(item.percent)}%</b></span>)}</div>
                   </div>
                 ),
               )}
@@ -3279,17 +3395,17 @@ function HistoricalHistory() {
    ========================================================= */
 
 function RoadSafetyLab() {
+  const navigate = useNavigate();
+  const { analysisContext, setAnalysisContext } = useAnalysisContext();
   const [hotspots, setHotspots] =
     useState([]);
 
   const [loading, setLoading] =
     useState(true);
 
-  const [selectedCity, setSelectedCity] =
-    useState("All Cities");
-
   const [minimumAccidents, setMinimumAccidents] =
     useState(15);
+  const [selectedProfile, setSelectedProfile] = useState("All Profiles");
 
   useEffect(() => {
     let cancelled = false;
@@ -3299,7 +3415,7 @@ function RoadSafetyLab() {
         setLoading(true);
 
         const response = await fetch(
-          `${API_BASE}/api/hotspots`,
+          `${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`,
         );
 
         if (!response.ok) {
@@ -3334,30 +3450,21 @@ function RoadSafetyLab() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
 
-  const cities = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          hotspots
-            .map(
-              (item) => item.city,
-            )
-            .filter(Boolean),
-        ),
-      ).sort(),
-    [hotspots],
-  );
+
+
 
   const filtered = useMemo(
     () =>
       hotspots.filter(
         (hotspot) =>
-          (selectedCity ===
+          (analysisContext.city ===
             "All Cities" ||
             hotspot.city ===
-              selectedCity) &&
+              analysisContext.city) &&
+          (selectedProfile === "All Profiles" || hotspot.risk_profile === selectedProfile) &&
+          (analysisContext.severity === "All Severities" || safeNumber(hotspot.statistics?.[`${analysisContext.severity}_accidents`]) > 0) &&
           safeNumber(
             hotspot.statistics
               ?.accident_count,
@@ -3366,7 +3473,9 @@ function RoadSafetyLab() {
       ),
     [
       hotspots,
-      selectedCity,
+      analysisContext.city,
+      analysisContext.severity,
+      selectedProfile,
       minimumAccidents,
     ],
   );
@@ -3410,6 +3519,13 @@ function RoadSafetyLab() {
       )
       .slice(0, 8);
 
+  function locateLabHotspot(hotspot) {
+    setAnalysisContext((current) => ({ ...current, city: hotspot.city }));
+    navigate(`/map?city=${encodeURIComponent(hotspot.city)}&cluster=${hotspot.cluster_id}`, {
+      state: { focus: { latitude: hotspot.location?.latitude, longitude: hotspot.location?.longitude } },
+    });
+  }
+
   if (loading) {
     return (
       <LoadingState label="Loading Road Safety Lab..." />
@@ -3429,26 +3545,23 @@ function RoadSafetyLab() {
           </h3>
 
           <p>
-            These controls filter the existing hotspot candidates.
-            They do not recalculate DBSCAN or create a new risk score.
+            Context filters narrow records within existing hotspot candidates; DBSCAN cluster identities and full-period risk profiles remain unchanged.
           </p>
         </div>
 
         <div className="lab-controls">
           <select
             className="hotspot-select"
-            value={selectedCity}
+            value={analysisContext.city}
             onChange={(event) =>
-              setSelectedCity(
-                event.target.value,
-              )
+              setAnalysisContext((current) => ({ ...current, city: event.target.value }))
             }
           >
             <option>
               All Cities
             </option>
 
-            {cities.map(
+            {ANALYSIS_CITIES.map(
               (city) => (
                 <option
                   key={city}
@@ -3458,6 +3571,15 @@ function RoadSafetyLab() {
                 </option>
               ),
             )}
+          </select>
+
+          <select className="hotspot-select" value={selectedProfile} onChange={(event) => setSelectedProfile(event.target.value)}>
+            <option value="All Profiles">All risk profiles</option>
+            {[...new Set(hotspots.map((hotspot) => hotspot.risk_profile).filter(Boolean))].map((profile) => <option key={profile} value={profile}>{formatRiskProfile(profile)}</option>)}
+          </select>
+
+          <select className="hotspot-select" value={analysisContext.severity} onChange={(event) => setAnalysisContext((current) => ({ ...current, severity: event.target.value }))}>
+            <option>All Severities</option><option value="fatal">Fatal present</option><option value="major">Major present</option><option value="minor">Minor present</option>
           </select>
 
           <label className="range-control">
@@ -3550,9 +3672,10 @@ function RoadSafetyLab() {
                   1;
 
                 return (
-                  <div
+                  <button type="button"
                     className="profile-bar-row"
                     key={profile}
+                    onClick={() => setSelectedProfile(profile)}
                   >
                     <div className="profile-bar-label">
                       <span>
@@ -3575,7 +3698,7 @@ function RoadSafetyLab() {
                         }}
                       />
                     </div>
-                  </div>
+                  </button>
                 );
               },
             )}
@@ -3614,6 +3737,7 @@ function RoadSafetyLab() {
                         ?.accident_count,
                     )}
                   </b>
+                  <button type="button" className="text-action" onClick={() => locateLabHotspot(hotspot)}>Locate on map</button>
                 </div>
               ),
             )}
@@ -3645,6 +3769,8 @@ function RoadSafetyLab() {
    ========================================================= */
 
 function Reports() {
+  const { analysisContext } = useAnalysisContext();
+  const [analysisData, setAnalysisData] = useState(null);
   const [dashboard, setDashboard] =
     useState(null);
 
@@ -3669,12 +3795,14 @@ function Reports() {
         dashboardResponse,
         hotspotsResponse,
         historyResponse,
+        analysisResponse,
       ] = await Promise.all([
         fetch(`${API_BASE}/api/dashboard`),
-        fetch(`${API_BASE}/api/hotspots`),
+        fetch(`${API_BASE}/api/hotspots?${contextQuery(analysisContext)}`),
         fetch(
           `${API_BASE}/api/history/kerala`,
         ),
+        fetch(`${API_BASE}/api/analysis/context?${contextQuery(analysisContext)}`),
       ]);
 
       if (!dashboardResponse.ok) {
@@ -3694,10 +3822,11 @@ function Reports() {
           "History request failed.",
         );
       }
+      if (!analysisResponse.ok) throw new Error("Analysis context request failed.");
 
-      setDashboard(
-        await dashboardResponse.json(),
-      );
+      const [dashboardData, analysisJson] = await Promise.all([dashboardResponse.json(), analysisResponse.json()]);
+      setDashboard(dashboardData);
+      setAnalysisData(analysisJson);
 
       const hotspotData =
         await hotspotsResponse.json();
@@ -3727,14 +3856,15 @@ function Reports() {
 
   useEffect(() => {
     loadReports();
-  }, []);
+  }, [analysisContext.city, analysisContext.severity, analysisContext.startYear, analysisContext.endYear]);
 
   const cityRows =
     Array.isArray(
-      dashboard?.cities,
+      analysisData?.cities,
     )
-      ? dashboard.cities
+      ? analysisData.cities.map((city) => ({ ...city, hotspot_candidates: hotspots.filter((hotspot) => hotspot.city === city.city).length }))
       : [];
+  const scopedHotspotCount = cityRows.reduce((sum, city) => sum + city.hotspot_candidates, 0);
 
   const topHotspots =
     [...hotspots]
@@ -3755,9 +3885,10 @@ function Reports() {
     const lines = [
       "ROADSAFE INDIA — ANALYTICAL SUMMARY",
       "",
-      `Total accident records: ${dashboard?.overview?.total_accidents ?? "—"}`,
-      `Spatial clusters: ${dashboard?.overview?.spatial_clusters ?? "—"}`,
-      `Hotspot candidates: ${dashboard?.overview?.hotspot_candidates ?? "—"}`,
+      `Scope: ${analysisContext.city} · ${humanize(analysisContext.severity)} · ${analysisContext.startYear}–${analysisContext.endYear}`,
+      `Total accident records: ${analysisData?.summary?.accidents ?? "—"}`,
+      `Spatial clusters in scope: ${analysisData?.summary?.spatial_clusters ?? "—"}`,
+      `Hotspot candidates (city scope, full period): ${scopedHotspotCount}`,
       `Multiple-indicator hotspots: ${dashboard?.overview?.multiple_indicator_hotspots ?? "—"}`,
       "",
       "CITY COVERAGE",
@@ -3853,21 +3984,17 @@ function Reports() {
         <StatCard
           icon={AlertTriangle}
           label="ACCIDENT RECORDS"
-          value={formatNumber(
-            dashboard?.overview
-              ?.total_accidents,
-          )}
-          detail="Contemporary dataset"
+          value={formatNumber(analysisData?.summary?.accidents)}
+          detail="Current global analysis context"
         />
 
         <StatCard
           icon={Layers3}
           label="SPATIAL CLUSTERS"
           value={formatNumber(
-            dashboard?.overview
-              ?.spatial_clusters,
+            analysisData?.summary?.spatial_clusters,
           )}
-          detail="DBSCAN-derived"
+          detail="Existing DBSCAN cluster records in scope"
           accent
         />
 
@@ -3875,10 +4002,9 @@ function Reports() {
           icon={Target}
           label="HOTSPOTS"
           value={formatNumber(
-            dashboard?.overview
-              ?.hotspot_candidates,
+            scopedHotspotCount,
           )}
-          detail="Candidate clusters"
+          detail="City scope; DBSCAN candidates are full-period"
         />
 
         <StatCard
@@ -4284,6 +4410,45 @@ function PageHeader() {
   );
 }
 
+function CommandPalette({ onClose }) {
+  const navigate = useNavigate();
+  const { setAnalysisContext } = useAnalysisContext();
+  const [query, setQuery] = useState("");
+  const [hotspots, setHotspots] = useState([]);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    fetch(`${API_BASE}/api/hotspots`).then((response) => response.json()).then((data) => setHotspots(data.hotspots || [])).catch(() => setHotspots([]));
+  }, []);
+
+  const pages = navigation.map((item) => ({ label: item.label, detail: "Open page", action: () => navigate(item.path) }));
+  const cityOptions = ANALYSIS_CITIES.map((city) => ({
+    label: `Set city: ${city}`, detail: "Update global analysis context", action: () => { setAnalysisContext((current) => ({ ...current, city })); navigate("/map"); },
+  }));
+  const hotspotOptions = hotspots.map((hotspot) => ({
+    label: `${hotspot.city} · Cluster ${hotspot.cluster_id}`,
+    detail: `${formatNumber(hotspot.statistics?.accident_count)} accidents · ${formatRiskProfile(hotspot.risk_profile)}`,
+    action: () => { setAnalysisContext((current) => ({ ...current, city: hotspot.city })); navigate(`/hotspots?city=${encodeURIComponent(hotspot.city)}&cluster=${hotspot.cluster_id}`); },
+  }));
+  const compareMatch = query.match(/compare\s+([a-z]+)\s+(?:and|&)\s+([a-z]+)/i);
+  const searchItems = [
+    ...(compareMatch && ANALYSIS_CITIES.some((city) => city.toLowerCase() === compareMatch[1].toLowerCase()) && ANALYSIS_CITIES.some((city) => city.toLowerCase() === compareMatch[2].toLowerCase()) ? [{ label: `Compare ${compareMatch[1]} and ${compareMatch[2]}`, detail: "Open city comparison", action: () => { setAnalysisContext((current) => ({ ...current, city: "All Cities" })); navigate(`/cities?compare=${compareMatch[1]},${compareMatch[2]}`); } }] : []),
+    ...(query.toLowerCase().includes("fatal") ? [{ label: "Show fatal accidents", detail: "Set global severity context", action: () => { setAnalysisContext((current) => ({ ...current, severity: "fatal" })); navigate("/map"); } }] : []),
+    ...pages, ...cityOptions, ...hotspotOptions,
+  ].filter((item) => !query || `${item.label} ${item.detail}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12);
+
+  return (
+    <div className="command-palette-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="command-palette" role="dialog" aria-modal="true" aria-label="RoadSafe command palette">
+        <div className="command-palette-input"><Search size={18} /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && searchItems[0]) { searchItems[0].action(); onClose(); } }} placeholder="Search pages, cities, clusters, or commands…" /><kbd>ESC</kbd></div>
+        <div className="command-palette-results">{searchItems.map((item) => <button type="button" key={`${item.label}-${item.detail}`} onClick={() => { item.action(); onClose(); }}><span><strong>{item.label}</strong><small>{item.detail}</small></span><ChevronRight size={15} /></button>)}{searchItems.length === 0 && <p>No matching pages, cities, or hotspots.</p>}</div>
+        <footer><span>↑ ↓ navigate</span><span>Enter select</span><span>Esc close</span></footer>
+      </section>
+    </div>
+  );
+}
+
 /* =========================================================
    TOPBAR
    ========================================================= */
@@ -4291,6 +4456,7 @@ function PageHeader() {
 function Topbar({
   setMobileOpen,
 }) {
+  const { analysisContext, setAnalysisContext, openCommandPalette } = useAnalysisContext();
   const location = useLocation();
 
   const currentPage =
@@ -4312,27 +4478,41 @@ function Topbar({
           <Menu size={19} />
         </button>
 
-        <div className="topbar-context">
-          ROADSAFE INDIA
-          <span>
-            /
-          </span>
-          {currentPage.title}
+        <div className="topbar-context" aria-label={`RoadSafe India / ${currentPage.title}`}>
+          <img src="/assets/roadsafe-india-mark.png" alt="" className="topbar-brand-mark" />
+          <span className="topbar-context-separator">/</span>
+          <span>{currentPage.title}</span>
         </div>
       </div>
 
       <div className="topbar-actions">
-        <div className="command-search">
-          <Search size={14} />
+        <div className="analysis-context-controls" aria-label="Global analysis context">
+          <span>CONTEXT</span>
+          <select aria-label="Analysis city" value={analysisContext.city} onChange={(event) => setAnalysisContext((current) => ({ ...current, city: event.target.value }))}>
+            <option>All Cities</option>
+            {ANALYSIS_CITIES.map((city) => <option key={city}>{city}</option>)}
+          </select>
+          <select aria-label="Analysis severity" value={analysisContext.severity} onChange={(event) => setAnalysisContext((current) => ({ ...current, severity: event.target.value }))}>
+            <option>All Severities</option><option value="fatal">Fatal</option><option value="major">Major</option><option value="minor">Minor</option>
+          </select>
+          <select aria-label="Analysis period start" value={analysisContext.startYear} onChange={(event) => setAnalysisContext((current) => ({ ...current, startYear: Math.min(Number(event.target.value), current.endYear) }))}>
+            {[2022, 2023, 2024, 2025].map((year) => <option key={year}>{year}</option>)}
+          </select>
+          <span className="context-range-separator">to</span>
+          <select aria-label="Analysis period end" value={analysisContext.endYear} onChange={(event) => setAnalysisContext((current) => ({ ...current, endYear: Math.max(Number(event.target.value), current.startYear) }))}>
+            {[2022, 2023, 2024, 2025].map((year) => <option key={year}>{year}</option>)}
+          </select>
+        </div>
 
+        <button type="button" className="command-search" onClick={openCommandPalette}>
+          <Search size={14} />
           <span>
             Search intelligence
           </span>
-
           <kbd>
-            ⌘ K
+            Ctrl K
           </kbd>
-        </div>
+        </button>
 
         <div className="api-status">
           <span className="status-dot" />
@@ -4372,21 +4552,13 @@ function Sidebar({
         }`}
       >
         <div className="sidebar-header">
-          <div className="brand">
-            <div className="brand-mark">
-              <Shield size={20} />
-            </div>
-
-            <div>
-              <div className="brand-name">
-                ROADSAFE
-              </div>
-
-              <div className="brand-region">
-                INDIA
-              </div>
-            </div>
-          </div>
+          <NavLink to="/" className="brand" aria-label="RoadSafe India home">
+            <img
+              src="/assets/roadsafe-india-logo.png"
+              alt="RoadSafe India"
+              className="sidebar-brand-logo"
+            />
+          </NavLink>
 
           <button
             type="button"
@@ -4461,7 +4633,7 @@ function Sidebar({
           </div>
 
           <div className="sidebar-version">
-            ROADSAFE INDIA
+            SPATIAL INTELLIGENCE
             <span>·</span>
             v1.0
           </div>
@@ -4479,7 +4651,48 @@ function App() {
   const [mobileOpen, setMobileOpen] =
     useState(false);
 
+  const [analysisContext, setAnalysisContext] = useState(() => {
+    try {
+      return { ...ANALYSIS_DEFAULTS, ...JSON.parse(localStorage.getItem("roadsafe-analysis-context") || "{}") };
+    } catch {
+      return ANALYSIS_DEFAULTS;
+    }
+  });
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [brandSplashVisible, setBrandSplashVisible] = useState(true);
+
+  useEffect(() => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const splashTimer = window.setTimeout(
+      () => setBrandSplashVisible(false),
+      reducedMotion ? 260 : 3000,
+    );
+    return () => window.clearTimeout(splashTimer);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("roadsafe-analysis-context", JSON.stringify(analysisContext));
+  }, [analysisContext]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+      }
+      if (event.key === "Escape") setCommandPaletteOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
+    <AnalysisContext.Provider value={{ analysisContext, setAnalysisContext, openCommandPalette: () => setCommandPaletteOpen(true) }}>
+    {brandSplashVisible && (
+      <div className="brand-splash" role="status" aria-label="Loading RoadSafe India">
+        <img src="/assets/roadsafe-india-logo.png" alt="RoadSafe India" className="brand-splash-logo" />
+      </div>
+    )}
     <div className="app-shell">
       <Sidebar
         mobileOpen={mobileOpen}
@@ -4492,6 +4705,8 @@ function App() {
             setMobileOpen
           }
         />
+
+        {commandPaletteOpen && <CommandPalette onClose={() => setCommandPaletteOpen(false)} />}
 
         <main className="main-content">
           <PageHeader />
@@ -4551,6 +4766,7 @@ function App() {
         </main>
       </div>
     </div>
+    </AnalysisContext.Provider>
   );
 }
 

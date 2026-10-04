@@ -35,6 +35,9 @@ def hotspots(
         default=False,
         description="Return only priority hotspots",
     ),
+    severity: Optional[str] = Query(default=None, description="Scope candidate statistics to a severity"),
+    start_date: Optional[str] = Query(default=None, description="Inclusive ISO start date"),
+    end_date: Optional[str] = Query(default=None, description="Inclusive ISO end date"),
 ):
     """
     Return hotspot candidates with optional filters.
@@ -44,6 +47,9 @@ def hotspots(
         city=city,
         risk_profile=risk_profile,
         priority_only=priority_only,
+        severity=severity,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     return {

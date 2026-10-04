@@ -34,19 +34,21 @@ def _safe_float(value):
 
 def get_kerala_history():
     """
-    Return historical Kerala black-spot records
-    that have valid Start Lat / Start Lng coordinates.
+    Return historical Kerala black-spot segments with complete
+    start and end coordinates for mapping.
     """
 
     df = load_kerala_blackspots()
 
     total_records = len(df)
 
-    # Only records with valid starting coordinates
-    # are suitable for the map layer.
+    # A record is mappable as a road segment only when both
+    # endpoint coordinate pairs are present.
     mapped = df[
         df["Start Lat"].notna()
         & df["Start Lng"].notna()
+        & df["End Lat"].notna()
+        & df["End Lng"].notna()
     ].copy()
 
     records = []
@@ -100,9 +102,9 @@ def get_kerala_history():
             ),
         },
         "summary": {
-            "total_records": int(total_records),
-            "mapped_records": int(len(mapped)),
-            "unmapped_records": int(
+            "total": int(total_records),
+            "mapped": int(len(mapped)),
+            "unmapped": int(
                 total_records - len(mapped)
             ),
         },

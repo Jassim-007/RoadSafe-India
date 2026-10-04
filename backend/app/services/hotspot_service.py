@@ -164,6 +164,9 @@ def get_hotspots(
     city: Optional[str] = None,
     risk_profile: Optional[str] = None,
     priority_only: bool = False,
+    severity: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> list[dict]:
     """
     Return hotspot candidates with optional filters.
@@ -175,6 +178,54 @@ def get_hotspots(
     """
 
     hotspots = _prepare_hotspots()
+
+    if severity or start_date or end_date:
+        clustered = load_clustered_accidents().copy()
+        clustered = clustered[
+            (clustered["dbscan_status"] == "clustered")
+            & (clustered["dbscan_cluster"] != -1)
+        ]
+        if city:
+            clustered = clustered[clustered["city"].str.casefold() == city.casefold()]
+        if severity:
+            clustered = clustered[
+                clustered["accident_severity"].str.casefold() == severity.casefold()
+            ]
+        if start_date:
+            clustered = clustered[clustered["date"].astype(str) >= start_date]
+        if end_date:
+            clustered = clustered[clustered["date"].astype(str) <= end_date]
+
+        candidates = hotspots[["city", "dbscan_cluster"]].drop_duplicates()
+        clustered = clustered.merge(candidates, on=["city", "dbscan_cluster"], how="inner")
+        if clustered.empty:
+            hotspots = hotspots.iloc[0:0].copy()
+        else:
+            clustered["accident_severity"] = clustered["accident_severity"].str.lower()
+            scoped = clustered.groupby(["city", "dbscan_cluster"]).agg(
+                accident_count=("accident_id", "count"),
+                total_casualties=("casualties", "sum"),
+                mean_casualties=("casualties", "mean"),
+                mean_vehicles=("vehicles_involved", "mean"),
+                mean_risk_score=("risk_score", "mean"),
+                fatal_accidents=("accident_severity", lambda values: (values == "fatal").sum()),
+                major_accidents=("accident_severity", lambda values: (values == "major").sum()),
+                minor_accidents=("accident_severity", lambda values: (values == "minor").sum()),
+            ).reset_index()
+            scoped["fatality_proportion"] = scoped["fatal_accidents"] / scoped["accident_count"]
+            scoped["major_proportion"] = scoped["major_accidents"] / scoped["accident_count"]
+            scoped["severe_proportion"] = (scoped["fatal_accidents"] + scoped["major_accidents"]) / scoped["accident_count"]
+            hotspots = hotspots.merge(scoped, on=["city", "dbscan_cluster"], how="inner", suffixes=("", "_scoped"))
+            for column in (
+                "accident_count", "total_casualties", "mean_casualties",
+                "mean_vehicles", "mean_risk_score", "fatal_accidents",
+                "major_accidents", "minor_accidents", "fatality_proportion",
+                "major_proportion", "severe_proportion",
+            ):
+                scoped_column = f"{column}_scoped"
+                if scoped_column in hotspots.columns:
+                    hotspots[column] = hotspots[scoped_column]
+                    hotspots.drop(columns=[scoped_column], inplace=True)
 
     # --------------------------------------------------------
     # City filter

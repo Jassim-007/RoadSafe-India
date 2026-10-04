@@ -174,6 +174,8 @@ def get_accidents(
     severity: Optional[str] = None,
     road_type: Optional[str] = None,
     weather: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     traffic_density: Optional[str] = None,
     is_peak_hour: Optional[bool] = None,
     is_weekend: Optional[bool] = None,
@@ -206,6 +208,12 @@ def get_accidents(
             .str.lower()
             == severity.lower()
         ]
+
+    if start_date:
+        accidents = accidents[accidents["date"] >= start_date]
+
+    if end_date:
+        accidents = accidents[accidents["date"] <= end_date]
 
     # --------------------------------------------------------
     # ROAD TYPE

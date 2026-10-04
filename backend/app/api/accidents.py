@@ -40,6 +40,10 @@ def accidents(
         description="Filter by weather",
     ),
 
+    start_date: Optional[str] = Query(default=None, description="Inclusive ISO start date"),
+
+    end_date: Optional[str] = Query(default=None, description="Inclusive ISO end date"),
+
     traffic_density: Optional[str] = Query(
         default=None,
         description="Filter by traffic density",
@@ -74,6 +78,8 @@ def accidents(
         severity=severity,
         road_type=road_type,
         weather=weather,
+        start_date=start_date,
+        end_date=end_date,
         traffic_density=traffic_density,
         is_peak_hour=is_peak_hour,
         is_weekend=is_weekend,
