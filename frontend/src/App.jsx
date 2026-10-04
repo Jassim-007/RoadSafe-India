@@ -33,7 +33,6 @@ import {
   SlidersHorizontal,
   Target,
   TrendingUp,
-  Users,
   X,
 } from "lucide-react";
 
@@ -220,38 +219,6 @@ function humanize(value) {
     .replaceAll("_", " ")
     .replaceAll("-", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function getArray(data, keys = []) {
-  if (Array.isArray(data)) {
-    return data;
-  }
-
-  for (const key of keys) {
-    if (Array.isArray(data?.[key])) {
-      return data[key];
-    }
-  }
-
-  return [];
-}
-
-function getObject(data, keys = []) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return {};
-  }
-
-  for (const key of keys) {
-    if (
-      data[key] &&
-      typeof data[key] === "object" &&
-      !Array.isArray(data[key])
-    ) {
-      return data[key];
-    }
-  }
-
-  return data;
 }
 
 function safeNumber(value, fallback = 0) {
@@ -546,7 +513,7 @@ function Overview() {
 
                 <span className="city-status">
                   <span className="status-dot" />
-                  Analysed
+                  {city.city === "Chandigarh" ? "Descriptive only" : "Clustered"}
                 </span>
               </div>
             ))}
@@ -1134,7 +1101,7 @@ function LiveMap() {
                 filteredAccidents.length,
               )}
             </b>{" "}
-            displayed
+            shown (limit 100)
           </span>
 
           <span>
@@ -1143,7 +1110,7 @@ function LiveMap() {
                 accidentTotal,
               )}
             </b>{" "}
-            total records
+            total in dataset
           </span>
 
           <span>
@@ -2475,7 +2442,7 @@ function Cities() {
 
                     <span className="city-status">
                       <span className="status-dot" />
-                      Analysed
+                      {city.city === "Chandigarh" ? "Descriptive only" : "Clustered"}
                     </span>
                   </div>
 
@@ -2674,15 +2641,8 @@ function RiskFactors() {
       setLoading(true);
       setError("");
 
-      const [
-        factorResponse,
-        roadResponse,
-        numericResponse,
-      ] = await Promise.all([
+      const [factorResponse, numericResponse] = await Promise.all([
         fetch(`${API_BASE}/api/factors`),
-        fetch(
-          `${API_BASE}/api/factors/road_type`,
-        ),
         fetch(
           `${API_BASE}/api/factors/numeric`,
         ),
@@ -2697,18 +2657,13 @@ function RiskFactors() {
       const factorJson =
         await factorResponse.json();
 
-      const roadJson =
-        roadResponse.ok
-          ? await roadResponse.json()
-          : null;
-
       const numericJson =
         numericResponse.ok
           ? await numericResponse.json()
           : null;
 
-      setFactorData(factorJson);
-      setRoadTypeData(roadJson);
+      setFactorData(factorJson?.factors ?? {});
+      setRoadTypeData(factorJson?.factors?.road_type ?? null);
       setNumericData(numericJson);
     } catch (requestError) {
       console.error(requestError);
@@ -2725,43 +2680,15 @@ function RiskFactors() {
     loadFactors();
   }, []);
 
-  const factorObject = getObject(
-    factorData,
-    [
-      "factors",
-      "summary",
-      "results",
-    ],
-  );
-
-  const factorEntries = Object.entries(
-    factorObject,
-  )
-    .filter(
-      ([, value]) =>
-        typeof value === "number" ||
-        typeof value === "string",
-    )
-    .slice(0, 12);
-
-  const roadRows = getArray(
-    roadTypeData,
-    [
-      "road_types",
-      "results",
-      "data",
-      "items",
-    ],
-  );
-
-  const numericRows = getArray(
-    numericData,
-    [
-      "factors",
-      "results",
-      "data",
-      "items",
-    ],
+  const factorObject = factorData || {};
+  const factorEntries = Object.entries(factorObject)
+    .map(([name, table]) => [name, `${table.rows?.length ?? 0} groups`]);
+  const roadRows = (roadTypeData?.rows || []).map((row) => ({
+    road_type: row.analysis_group,
+    ...row.values,
+  }));
+  const numericRows = Object.entries(numericData?.summary || {}).map(
+    ([factor, summary]) => ({ factor, ...summary }),
   );
 
   if (loading) {
@@ -3168,7 +3095,7 @@ function HistoricalHistory() {
           icon={HistoryIcon}
           label="SOURCE RECORDS"
           value={formatNumber(
-            data?.total,
+            data?.summary?.total,
           )}
           detail="Rows represented by the historical source"
           accent
@@ -3178,18 +3105,18 @@ function HistoricalHistory() {
           icon={MapPin}
           label="MAPPED RECORDS"
           value={formatNumber(
-            data?.mapped,
+            data?.summary?.mapped,
           )}
-          detail="Records with usable start coordinates"
+          detail="Records with complete start and end coordinates"
         />
 
         <StatCard
           icon={CircleDot}
           label="UNMAPPED RECORDS"
           value={formatNumber(
-            data?.unmapped,
+            data?.summary?.unmapped,
           )}
-          detail="Historical records without mapped start coordinates"
+          detail="Records missing one or more endpoint coordinates"
         />
 
         <StatCard
@@ -3846,9 +3773,9 @@ function Reports() {
       ),
       "",
       "HISTORICAL KERALA REFERENCE",
-      `Source records: ${history?.total ?? "—"}`,
-      `Mapped records: ${history?.mapped ?? "—"}`,
-      `Unmapped records: ${history?.unmapped ?? "—"}`,
+      `Source records: ${history?.summary?.total ?? "—"}`,
+      `Mapped records: ${history?.summary?.mapped ?? "—"}`,
+      `Unmapped records: ${history?.summary?.unmapped ?? "—"}`,
       "",
       "RoadSafe India combines a contemporary selected-city accident dataset with a separate historical Kerala black-spot reference layer.",
     ];
@@ -3958,9 +3885,9 @@ function Reports() {
           icon={HistoryIcon}
           label="KERALA RECORDS"
           value={formatNumber(
-            history?.total,
+            history?.summary?.total,
           )}
-          detail="Separate historical reference"
+          detail="Separate historical Kerala reference"
         />
       </section>
 
@@ -3995,6 +3922,10 @@ function Reports() {
                     )}{" "}
                     clustered
                   </span>
+
+                  {city.city === "Chandigarh" && (
+                    <span>Descriptive only</span>
+                  )}
                 </div>
               ),
             )}
@@ -4181,7 +4112,7 @@ function Methodology() {
           <div className="methodology-list">
             <MethodologyRow
               label="Records"
-              value="20,000"
+              value="20,000 records"
             />
 
             <MethodologyRow
